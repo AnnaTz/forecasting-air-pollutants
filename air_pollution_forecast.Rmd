@@ -1,0 +1,245 @@
+---
+title: "Advanced Predictive Models - Assignment 2"
+output:
+  pdf_document:
+    fig_caption: yes
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r, echo=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(gridExtra)
+library(forecast)
+library(kableExtra)
+```
+
+## Introduction
+
+One of the concerns of governments around the world is the anthropogenic influence on air pollutant concentrations. The table below describes the principal airborne pollutants monitored by the European agencies, along with a list of their main sources.
+
+```{r}
+
+pollutants = c("PM10 & PM2.5", "Ozone", "Nitrogen Dioxide", "Carbon Monoxide", "Sulphur Dioxide")
+sources = c("Combustion and mechanical actions (erosion, friction etc.), chemical-physical processes that occur in the atmosphere starting from precursors even in the gaseous phase.", "There are no significant anthropogenic emission sources into the atmosphere.", "Heating systems, motor vehicle traffic, power plants, industrial activities (combustion processes)",  "Road traffic", "Heating systems, power plants, combustion of organic products of fossil origin containing sulfur (diesel, coal, fuel oil)")
+
+df <- data.frame(name = pollutants, description = sources)
+kable(df, col.names = c("Pollutant", "Anthropogenic Sources")) %>% kable_styling(position = "left", bootstrap_options = "bordered") %>% column_spec(2, width = "13cm")
+
+```
+
+In this assignment, we are provided with weekly data that contain observations on the concentration of different pollutants and environmental variables, measured in an Italian region from 2014 to 2017.
+
+In the following sections we will develop a 'best-fitting' model for forecasting the concentration of *Ozone* in the atmosphere. We will start with exploring the temporal pattern of the chosen pollutant concentration, and then we will develop a 'best-fitting' ARIMA model for the data, we will evaluate its predictive accuracy and use it to make forecasts of future concentration.
+
+## Task 1: data exploration
+
+Our dataset contains 209 weekly observations, spanning from 2014-01-05 to 2017-12-31. The first 75% of the data, covering the period from 2014 to 2016, will be allocated for model fitting (training set), and the remaining 25% of the data, covering the year 2017, for model evaluation (testing set). In this way, our model can be trained on a large enough portion of the dataset containing a substantial amount of historical information, and get evaluated on how well it can make predictions and handle unseen future data.
+
+```{r}
+
+data = read.csv(url("http://www.stats.gla.ac.uk/~tereza/rp/Air_pollution_assignment.csv"))
+data$Date <- as.Date(data$Date, format = "%Y-%m-%d")
+
+train = subset(data, Date < as.Date("2017-01-01"))
+test = subset(data, Date >= as.Date("2017-01-01"))
+
+extra = read.csv(url("http://www.stats.gla.ac.uk/~tereza/rp/Weather_weekly_assignment.csv"))
+extra$Date <- as.Date(extra$Date, format = "%Y-%m-%d")
+
+train.extra = subset(extra, Date < as.Date("2017-01-01"))
+test.extra = subset(extra, Date >= as.Date("2017-01-01") & Date <= as.Date("2017-12-31"))
+```
+
+```{r, fig.height = 4, fig.cap="ozone concentration and environmental variables"}
+
+p0 = ggplot(data = train, aes(x = Date, y = Ozone)) + geom_line(color = "#41ab5d") + labs(y = "ozone concentration", x = "time")
+
+p1 = ggplot(data = train.extra, aes(x = Date, y = Temperature)) + geom_line(color = "#41ab5d") + labs(y = "temperature", x = "time")
+
+p2 = ggplot(data = train.extra, aes(x = Date, y = Relative_humidity)) + geom_line(color = "#41ab5d") + labs(y = "relative humidity", x = "time")
+
+grid.arrange(grobs = list(p0, p1, p2), nrow = 3)
+```
+
+Examining the plot of ozone concentration in Figure 1, we observe a distinct seasonal pattern that repeats on a yearly basis. Specifically, we notice that the ozone concentration tends to exhibit higher values in the summer and lower in the winter. Furthermore, there appears to be a subtle declining trend, evident from the fact that the peak ozone concentration during the last portrayed summer is slightly lower than the peaks observed in previous years.
+
+To formally analyze these temporal patterns, we can apply STL (Seasonal and Trend decomposition using Loess) on our data. This provides us with an additive decomposition of the ozone concentration into trend, seasonal effect, and unexplained variation, portrayed in Figure 2.
+
+Finally, going back to Figure 1, we can observe that the time series of temperature exhibits a seasonal pattern similar to that of the ozone concentration, which suggests a potential relationship between these variables. In contrast, the time series of relative humidity does not exhibit any distinct pattern, which implies a lack of correlation with the observed ozone.
+
+```{r, fig.height = 4, fig.cap="additive decomposition of the ozone time series"}
+
+ts_data = ts(train$Ozone, frequency = 52)
+
+result <- stl(ts_data, t.window = 3*52 + 1, s.window = "periodic", robust = TRUE)
+
+result %>% autoplot()
+```
+
+## Task 2: 'best-fitting' ARIMA
+
+Taking into consideration the conclusions drawn in the previous section, we will now attempt to develop a 'best-fitting' ARIMA model of *Ozone*, including *Temperature* as an additional external predictor.
+
+We have observed that our data are clearly non-stationary, with strong seasonality, so we will first take a seasonal difference. The seasonally adjusted data are shown in Figure 3.
+
+```{r, fig.height = 3, fig.cap="residuals from the fitted ARIMA(0,0,0)(0,1,0) model"}
+
+ts_data %>% arima(order = c(0,0,0), seasonal = c(0,1,0), xreg = train.extra$Temperature) %>% residuals() %>% ggtsdisplay()
+
+```
+
+The data still appears to be non-stationary (this links back to the subtle trend evidenced in Figure 2), so we take an additional first difference, shown in Figure 4.
+
+```{r, fig.height = 3, fig.cap="residuals from the fitted ARIMA(0,1,0)(0,1,0) model"}
+
+ts_data %>% arima(order = c(0,1,0), seasonal = c(0,1,0), xreg = train.extra$Temperature) %>% residuals() %>% ggtsdisplay()
+```
+
+The data now appear to be stationary, so our aim is to find an appropriate ARIMA model based on the ACF and PACF shown in Figure 4. The significant spike at lag 52 in the ACF suggest an AR(1) seasonal component (52 is exactly the frequency of our series as it consists of weekly observations with a yearly pattern). So, we begin with an ARIMA(0,1,0)(1,1,0) model, indicating a first and seasonal difference, and an AR(1) seasonal component. The residuals from the fitted model are shown in Figure 5.
+
+```{r, fig.height = 3, fig.cap="residuals from the fitted ARIMA(0,1,0)(1,1,0) model"}
+
+ts_data %>% arima(order = c(0,1,0), seasonal = c(1,1,0), xreg = train.extra$Temperature) %>% residuals() %>% ggtsdisplay()
+```
+
+Both the ACF and PACF in Figure 5 show significant spikes at early lags, indicating that some additional non-seasonal terms need to be included in the model. We try models with various combinations of AR and MA terms and measure their AIC; ARIMA(2,1,0)(1,1,0) gets an AIC score of 819.44, ARIMA(2,1,1)(0,1,1) gets 799.99, ARIMA(1,1,2)(0,1,1) gets 790.78, and ARIMA(0,1,2)(0,1,1) gets 788.00. Consequently, we choose the ARIMA(0,1,2)(1,1,0) model. Its residuals are plotted in Figure 6.
+
+```{r, include=FALSE}
+
+AIC(arima(ts_data, order = c(0,1,0), seasonal = c(1,1,0), xreg = train.extra$Temperature))
+AIC(arima(ts_data, order = c(2,1,0), seasonal = c(1,1,0), xreg = train.extra$Temperature))
+AIC(arima(ts_data, order = c(2,1,1), seasonal = c(1,1,0), xreg = train.extra$Temperature))
+AIC(arima(ts_data, order = c(1,1,2), seasonal = c(1,1,0), xreg = train.extra$Temperature))
+AIC(arima(ts_data, order = c(0,1,2), seasonal = c(1,1,0), xreg = train.extra$Temperature))
+```
+
+```{r, fig.height = 3, fig.cap="residuals from the fitted ARIMA(0,1,2)(1,1,0) model"}
+
+ts_data %>% arima(order = c(0,1,2), seasonal = c(1,1,0), xreg = train.extra$Temperature) %>% residuals() %>% ggtsdisplay()
+```
+
+All the spikes in the ACF are now within the significance limits, with only a couple of barely significant late-lag spikes in the PACF. Thus, we have developed an ARIMA model that covers most of the significant variation in our data.
+
+## Task 3: test data forecast
+
+We will now use the fitted ARIMA model to generate a forecast of the concentration of ozone in the time period covered by our testing dataset. For the sake of comparison, we will also generate the same forecast using a harmonics model. We fit it on the same *Ozone* and *Temperature* training data, using a linear regression of `ozone ~ sin(2*pi*time/52) + cos(2*pi*time/52) + temp`. The resulting forecasts, along with their corresponding confidence intervals, are shown in Figure 7.
+
+```{r, fig.width = 5, fig.height = 5, fig.cap="forecasting against the test data"}
+
+model.harmonic <- lm(ozone ~ sin(2*pi*time/52) + cos(2*pi*time/52) + temp, data = data.frame(ozone = train$Ozone, time = 1:nrow(train), temp = train.extra$Temperature))
+forecast.harmonic <- predict(model.harmonic, newdata = data.frame(time = 157:(156 + 53), temp = test.extra$Temperature), interval = "prediction", level = 0.95)
+
+best.arima = Arima(ts_data, order = c(0,1,2), seasonal = c(1,1,0), xreg = train.extra$Temperature)
+forecast.arima <- forecast(best.arima, h = nrow(test), xreg = test.extra$Temperature)
+
+plot(test$Date, test$Ozone, ylim = c(min(forecast.arima$lower), max(forecast.arima$upper) + 60), type = "l", xlab = "time", ylab = "ozone concentration", main = "")
+
+polygon(c(rev(test$Date), test$Date), c(rev(forecast.harmonic[,"lwr"]), forecast.harmonic[,"upr"]), col  = rgb(0.99, 0.55, 0.23, 0.1), border = "#fd8d3c", lty = "dashed")
+
+lines(test$Date, forecast.harmonic[,"fit"], col = "#fc4e2a", lwd = 2)
+
+polygon(c(rev(test$Date), test$Date), c(rev(forecast.arima$upper[1:53]), forecast.arima$lower[1:53]), col = rgb(0.1, 0.4, 1, 0.1), border = "#1A66FF", lty = "dashed")
+
+lines(c(train$Date[104:156], test$Date), c(train$Ozone[104:156], test$Ozone), col = "black", lwd = 2)
+lines(test$Date, forecast.arima$mean, col = "#164E9B", lwd = 2)
+
+legend(x = "topleft", legend = c("real values", "harmonics forecast", "harmonics CIs", "ARIMA forecast", "ARIMA CIs"), lty = c(1, 1, 2, 1, 2), col = c("black", "#fc4e2a", "#fd8d3c", "#164E9B", "#1A66FF"), bty = "n", cex = 0.9)
+```
+
+We observe that the two models generate very similar forecasts. In both cases, the predicted values are considerably close to the real test values, and the confidence intervals cover most of the short-term variation range observed in the data. However, there are some areas of the data were the ARIMA model seems to give a more accurate prediction, namely in January, late April, late August, and December. For this reason, we will choose the ARIMA model as the best model to use in the following sections.
+
+## Task 4: out-of-sample forecast
+
+We will now evaluate the out-of-sample forecast of the ozone concentration for the 36 weeks ahead of the last available observation of our testing dataset.
+
+We will calculate the following metrics:
+
+1.  the Mean Absolute Error (MAE), which measures the average absolute difference between the predicted and actual values,
+
+2.  the Root Mean Squared Error (RMSE), which measures the square root of the average squared difference between the predicted and actual values,
+
+3.  the Coverage Probability, i.e. the proportion of times that the true values lie within the predicted confidence interval,
+
+4.  and the Confidence Interval Width, i.e. the range of the confidence interval or the difference between the upper and lower limits of the interval.
+
+It is worth noting that MAE and RMSE share the same scale with the response variable, but RMSE is sensitive to outliers as it squares the errors before averaging them. Also, there is a trade-off between confidence interval width and coverage probability. Narrower intervals (more precision) can result in lower coverage probability (less reliability) if they're too narrow to often include the true values.
+
+```{r}
+
+new = read.csv(url("http://www.stats.gla.ac.uk/~tereza/rp/Air_pollution_36.csv"))
+new$Date <- as.Date(new$Date, format = "%Y-%m-%d")
+
+new.extra = subset(extra, Date >= min(new$Date) & Date <= max(new$Date)+1)
+```
+
+```{r}
+
+get.metrics <- function(preds, real, lwr, upr, n){
+  list(
+    "MAE" = round(mean(abs(preds - real)), 3),
+    "RMSE" = round(sqrt(mean((preds - real)^2)), 3),
+    "CP" = round(100*sum(as.numeric(real > lwr & real < upr))/n, 3),
+    "CIW" = round(sum(upr - lwr)/n, 3)
+    ) 
+}
+```
+
+The following table shows the above metrics calculated for the model we developed, in comparison to the model that `auto.arima` produces after fitting a grid of ARIMA models and selecting the best one with respect to AIC and BIC scores.
+
+```{r, include=FALSE}
+
+total_n = nrow(test) + 36
+forecast.arima <- forecast(best.arima, h = nrow(test) + nrow(new), xreg = c(test.extra$Temperature, new.extra$Temperature))
+pred.arima = forecast.arima$mean[(nrow(test) + 1):total_n]
+upr.arima = forecast.arima$upper[(nrow(test) + 1):total_n]
+lwr.arima = forecast.arima$lower[(nrow(test) + 1):total_n]
+get.metrics(pred.arima, new$Ozone[1:36], lwr.arima, upr.arima, 36)
+
+arima.auto = auto.arima(ts_data, xreg = train.extra$Temperature)
+forecast.arima.auto = forecast(arima.auto, h = nrow(test) + nrow(new), xreg = c(test.extra$Temperature, new.extra$Temperature))
+pred.arima.auto = forecast.arima.auto$mean[(nrow(test) + 1):total_n]
+upr.arima.auto = forecast.arima.auto$upper[(nrow(test) + 1):total_n]
+lwr.arima.auto = forecast.arima.auto$lower[(nrow(test) + 1):total_n]
+get.metrics(pred.arima.auto, new$Ozone[1:36], lwr.arima.auto, upr.arima.auto, 36)
+```
+
+```{r, fig.cap="Table 1: out-of-sample performance evaluation"}
+
+metrics = c("Mean Absolute Error", "Root Mean Squared Error", "Coverage Probability", "Confidence Interval Width")
+manual = c(6.53, 7.65, 100, 43.74)
+auto = c(5.72, 7.32, 100, 32.17)
+
+df <- data.frame(metrics = metrics, manual = manual, auto = auto)
+kable(df, col.names = c("", "developed model", "auto.arima model")) %>% kable_styling(position = "left", bootstrap_options = "bordered", full_width = FALSE)
+```
+
+The `auto.arima` model has 12.4% lower MAE and 4.3% lower RMSE, indicating that, on average, its predictions are closer to the real values than the ones of the manually developed model. Their coverage probability is the same and equal to 100%, indicating that their confidence intervals usually manage to capture the true values and provide reliable estimations. However, the confidence interval width of the `auto.arima` model is 26.4% narrower, which implies higher precision than that of the developed model.
+
+## Task 5: discussion
+
+There are several limitations that come with our modelling approach. First, because it is a combination of several different seasonal and non-seasonal procedures, our ARIMA model is not explainable, and is quite computationally expensive. Moreover, our model assumes a linear relationship between the predictor (temperature) and the ozone concentration, and it also assumes that the pollutant's seasonal pattern remains constant over time. The more these assumptions deviate from the truth, the less reliable and accurate our model becomes.
+
+Incorporating more external variables that influence the pollutant concentration, and/or transforming them to allow for non-linear relationships would help address the last couple of limitations, and potentially enhance our model's precision. Furthermore, our study should ideally be expanded to include a thorough residuals analysis (e.g. using a histogram or a Q-Q plot) to assess the normality assumption which is crucial for the validity of our model. In case we identify a deviation from normality, transforming the dependend variables or the residuals might prove beneficial for our modelling approach.
+
+## Task 6: further forecast
+
+Because the data we are modelling demonstrate a strong seasonal pattern, it would not be irrational to make a long forecast further into the future, e.g. for the 120 weeks ahead of the last available observation, as shown in Figure 8.
+
+```{r, fig.height = 4, fig.cap="forecasting further into the future"}
+
+far.forecast.arima <- forecast(best.arima, h = nrow(test) + nrow(new), xreg = c(test.extra$Temperature, new.extra$Temperature))
+
+plot(x = test$Date, y = test$Ozone, type = "l", lwd = 2, xlab = "time", ylab = "ozone concentration", main = "", xlim = c(min(test$Date), max(new.extra$Date)), ylim = c(min(far.forecast.arima$mean), 170))
+
+lines(x = new.extra$Date, y = far.forecast.arima$mean[nrow(test)+1:nrow(new)], col = "#fc4e2a", lwd = 2, main = "")
+
+legend(x = "topleft", legend = c("real values", "ARIMA forecast"), lty = c(1, 1), col = c("black", "#fc4e2a"), bty = "n")
+```
+
+However, our model cannot account for major unexpected events that could significantly affect the air quality, such as volcanic eruptions, large forest fires, significant policy changes related to emissions, or drastic shifts in industrial activity or transportation patterns. Thus, we should always monitor such potential events and regularly update our model with the latest data.
